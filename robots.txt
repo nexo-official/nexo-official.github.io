@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Disallow: /styleguide/
+Disallow: /widget-gallery/
+
+Sitemap: https://nexo-official.github.io/sitemap.xml
