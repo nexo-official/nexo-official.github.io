@@ -6,9 +6,9 @@
  * Bilder und Klänge in einen Speicher, der nach dem Build benannt ist.
  *
  * Abrufen:
- *  - Seiten: erst das Netz (frischester Stand), aber höchstens 4 s warten –
- *    sonst/ohne Netz sofort die gespeicherte Seite. So startet Nexo auch im
- *    wackligen Schul-WLAN zügig.
+ *  - Seiten: aus dem gespeicherten Stand (gleicher Build wie Programm-Dateien
+ *    und Seitenwechsel-Daten – online wie offline identisch); nur was noch
+ *    nicht gespeichert ist, aus dem Netz (max. 4 s).
  *  - Dateien (/_next/static, Bilder, Audio …): aus dem Speicher, sonst Netz
  *    (und dann merken). Gebaute Dateien haben eindeutige Namen → nie veraltet.
  *  - Next-Daten für weiche Seitenwechsel (RSC): erst das Netz (max. 4 s), sonst
@@ -206,47 +206,56 @@ self.addEventListener("fetch", (event) => {
 });
 
 const rscKey = (path) => `/__rsc${path}`;
-const isPrefetch = (req) => !!(req.headers.get("Next-Router-Prefetch") || req.headers.get("Next-Router-Segment-Prefetch"));
 
-/** Next-Daten (weicher Seitenwechsel): Netz (max. 4 s), sonst gespeicherte Fassung. */
+/**
+ * Next-Daten (weicher Seitenwechsel): aus DEMSELBEN Build wie die laufende
+ * Seite – also aus dem gespeicherten Stand, nicht frisch aus dem Netz. Früher
+ * kam hier zuerst das Netz: Lief morgens (WLAN noch träge) die gespeicherte
+ * ALTE Seite, holte jeder Seitenwechsel Daten der NEUEN Version → Next brach
+ * ab und lud hart neu (Animationen mittendrin abgeschnitten). Jetzt verhält
+ * sich Nexo online wie offline gleich; neue Versionen kommen gesammelt per
+ * Update (siehe ServiceWorkerRegister).
+ */
 async function rsc(req) {
   const path = new URL(req.url).pathname;
+  const name = await currentCache();
+  if (name) {
+    const cache = await caches.open(name);
+    // Server-Fassung: beim Installieren je Seite gemerkt; Website (statischer
+    // Export): gewöhnliche .txt-Dateien der Offline-Liste (ohne ?_rsc=…).
+    const hit = (await cache.match(rscKey(path))) || (await cache.match(req, { ignoreSearch: true }));
+    if (hit) return hit;
+  }
   try {
-    const res = await Promise.race([
+    return await Promise.race([
       fetch(req),
       new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), PAGE_TIMEOUT)),
     ]);
-    return res;
   } catch {
-    if (isPrefetch(req)) return Response.error(); // Vorab-Abruf: einfach auslassen
-    const name = await currentCache();
-    const hit = name ? await caches.open(name).then((c) => c.match(rscKey(path))) : undefined;
-    // Website (statischer Export): Seitenwechsel-Daten sind gewöhnliche .txt-Dateien,
-    // die schon in der Offline-Liste stehen – ohne ?_rsc=… aus dem Speicher.
-    const file = hit ? undefined : await caches.match(req, { ignoreSearch: true });
-    return hit || file || Response.error();
+    return Response.error();
   }
 }
 
-/** Seite: Netz (max. 4 s), sonst Speicher. Frische Seiten werden gemerkt. */
+/**
+ * Seite: aus dem gespeicherten Stand (gleicher Build wie Programmcode und
+ * Seitenwechsel-Daten) – sonst Netz (max. 4 s). Was noch nicht gespeichert
+ * ist (erster Besuch, unbekannte Adresse), kommt aus dem Netz.
+ */
 async function page(req) {
-  const cached = () =>
-    caches.match(req, { ignoreSearch: true }).then((c) => c || caches.match("/", { ignoreSearch: true }));
+  const name = await currentCache();
+  if (name) {
+    const hit = await caches.open(name).then((c) => c.match(req, { ignoreSearch: true }));
+    if (hit) return hit;
+  }
   try {
     const res = await Promise.race([
       fetch(req),
       new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), PAGE_TIMEOUT)),
     ]);
-    if (res.ok) {
-      const name = await currentCache();
-      if (name) {
-        const copy = res.clone();
-        caches.open(name).then((c) => c.put(new URL(req.url).pathname, copy));
-      }
-    }
     return res;
   } catch {
-    return (await cached()) || Response.error();
+    const fallback = name ? await caches.open(name).then((c) => c.match("/")) : undefined;
+    return fallback || Response.error();
   }
 }
 
